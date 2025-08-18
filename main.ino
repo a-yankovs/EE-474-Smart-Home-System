@@ -12,12 +12,11 @@
 #include <BLEServer.h>
 #include "esp_sleep.h"
 
-
 // Generate random Service and Characteristic UUIDs: https://www.uuidgenerator.net/
 #define SERVICE_UUID        "76aba4a6-eb39-4a35-85b2-a6fbb20999cf"
 #define CHARACTERISTIC_UUID "2cdd5742-0b1a-4758-8096-cbc516b21eac"
 
-
+// pin definitions 
 #define LCD_ADDR 0x27                 ///< I2C address of the LCD
 #define ENABLE_BIT 0x04               ///< LCD enable bit for command latch
 #define SDA 8                         ///< I2C SDA pin
@@ -28,7 +27,6 @@
 #define ECHO_PIN 11
 #define MOTION_PIN 12
 
-
 #define ON_POS_ACTIVE   180
 #define ON_POS_REST      80
 #define OFF_POS_ACTIVE  170
@@ -37,18 +35,18 @@
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);   ///< LCD object for 16x2 screen
 Servo switchOn;
 Servo switchOff;
-static TaskHandle_t sensorTaskHandle = NULL;
+// static TaskHandle_t sensorTaskHandle = NULL;
 QueueHandle_t commandQueue = NULL;
 TimerHandle_t alarmTmr = NULL;
 TaskHandle_t ultrasonicSensorNotify; 
 
-volatile bool person_entered = false; 
+volatile bool person_present = false; 
 volatile bool motion_detected = false; 
 
 enum Cmd {
   CMD_ON = 1,
-  CMD_OFF = 2
-  };
+  CMD_OFF = 2};
+  
 volatile bool isLightOn = false;
 volatile bool clockSet = false;
 volatile int8_t clk_h = -1; 
@@ -60,8 +58,7 @@ volatile int32_t lastFiredMinute = -1;
 BLECharacteristic *globalMsg = NULL;
 BLECharacteristic *alarmChar = NULL;
 
-    
-}
+  
 // toggles lights on and servos return to default position 
 void doLightsOnOnce(void *arg) {
   switchOn.write(ON_POS_ACTIVE);
@@ -128,12 +125,12 @@ void onOffSystem(void *arg) {
 }
 
 void Task_MotionSense(void *pvParameters){ 
-  int motion_sensor_last_state = -1;
+  int last_state = -1;
   while(1){ 
     if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
       // if task notification received, set off motion sensor 
       int currentState = digitalRead(MOTION_PIN);
-      if (currentState != lastState) {
+      if (currentState != last_state) {
         if (currentState == LOW){ //no motion detected 
           Cmd c = CMD_OFF; 
           if (commandQueue) { 
@@ -143,19 +140,21 @@ void Task_MotionSense(void *pvParameters){
           Cmd c = CMD_ON; 
           if (commandQueue) { 
             xQueueSend(commandQueue, &c, 0); 
+          }
+
         }
-        lastState = currentState;
-    }
+        last_state = currentState;
+      }
     }
   }
 }
 
-void Task_ultraSonicSense(void *pvParameters){ 
+void Task_ultrasonicSense(void *pvParameters){ 
   while(1){ 
     digitalWrite(TRIG_PIN, LOW);
-    vTaskDelay(pdMS_TO_TICKS(10); 
+    vTaskDelay(pdMS_TO_TICKS(10)); 
     digitalWrite(TRIG_PIN, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(10); 
+    vTaskDelay(pdMS_TO_TICKS(10)); 
     digitalWrite(TRIG_PIN, LOW);
 
     // Measure echo time in microseconds
@@ -174,6 +173,7 @@ void Task_ultraSonicSense(void *pvParameters){
         } else{ 
           Serial.println("Person entered room"); 
         }
+        person_present = !(person_present); 
       }
     }
   }
@@ -284,6 +284,7 @@ void setup() {
   pinMode(MOTION_PIN, INPUT);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
+
   switchOn.setPeriodHertz(50);             // Set PWM frequency to 50Hz (standard for most servos)
   switchOff.setPeriodHertz(50);
   switchOn.attach(SERVO_PIN_ON, 500, 2400);    // Attach the servo object to a pin with min/max pulse widths
@@ -333,8 +334,9 @@ void setup() {
   // pinMode(MOTION_SENSOR, INPUT_PULLDOWN);
 
   commandQueue = xQueueCreate(8, sizeof(Cmd));                              
-  xTaskCreatePinnedToCore(sensorTask, "Sensing", 2048, NULL, 1, &sensorTaskHandle, 0);
   xTaskCreatePinnedToCore(onOffSystem, "OnOff", 2048, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(Task_MotionSense, "MotionSense", 3072, NULL, 2, &ultrasonicSensorNotify, 1);
+  xTaskCreatePinnedToCore(Task_ultrasonicSense, "UltraSense", 3072, NULL, 1, NULL, 0);
 }
 
 void loop() {}
