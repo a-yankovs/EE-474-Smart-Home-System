@@ -10,6 +10,7 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include "esp_sleep.h"
 
 
 // Generate random Service and Characteristic UUIDs: https://www.uuidgenerator.net/
@@ -23,9 +24,9 @@
 #define SCL 9                         ///< I2C SCL pin
 #define SERVO_PIN_ON 4 //NO CHANGE
 #define SERVO_PIN_OFF 5 //NO CHANGE
-#define US_SENSOR 6 //change according to pin choosen
-#define MOTION_SENSOR 7 //change according to pin choosen
-#define PHOTO_PIN 8 //change according to pin choosen
+#define TRIG_PIN 10
+#define ECHO_PIN 11
+#define MOTION_PIN 12
 
 
 #define ON_POS_ACTIVE   180
@@ -36,20 +37,24 @@
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);   ///< LCD object for 16x2 screen
 Servo switchOn;
 Servo switchOff;
-TaskHandle_t sensorTaskHandle;
+static TaskHandle_t sensorTaskHandle = NULL;
 QueueHandle_t commandQueue = NULL;
 TimerHandle_t alarmTmr = NULL;
 
-enum Cmd : uint8_t {CMD_ON = 1, CMD_OFF = 2};
+enum Cmd {
+  CMD_ON = 1,
+  CMD_OFF = 2
+  };
 volatile bool isLightOn = false;
 volatile bool clockSet = false;
-volatile int8_t clk_h = -1, clk_m = -1, clk_s = 0;
+volatile int8_t clk_h = -1; 
+volatile int8_t clk_m = -1; 
+volatile int8_t clk_s = 0;
 volatile int8_t alarm_h = -1, alarm_m = -1;
 volatile int32_t lastFiredMinute = -1;
+
 BLECharacteristic *globalMsg = NULL;
 BLECharacteristic *alarmChar = NULL;
-
-
 
 void Task_lightDetector(void *pvParameters){
     while (1) {
@@ -70,8 +75,6 @@ void Task_lightDetector(void *pvParameters){
       vTaskDelay(pdMS_TO_TICKS(10)); 
     }
 }
-
-
 
 /**
  * @brief Displays light level and moving average on LCD.
@@ -100,7 +103,7 @@ void Task_displayAverage(void *pvParameters) {
     }
     
 }
-
+// toggles lights on and servos return to default position 
 void doLightsOnOnce(void *arg) {
   switchOn.write(ON_POS_ACTIVE);
   vTaskDelay(pdMS_TO_TICKS(2000));
@@ -109,6 +112,7 @@ void doLightsOnOnce(void *arg) {
   isLightOn = true;
 }
 
+// toggles lights off and servos return to default position 
 void doLightsOffOnce(void *arg) {
   switchOff.write(OFF_POS_ACTIVE);
   vTaskDelay(pdMS_TO_TICKS(2000));
@@ -117,18 +121,17 @@ void doLightsOffOnce(void *arg) {
   isLightOn = false;
 }
 
+// 
 void burstLight(void *arg) {
   for(int i = 0; i < 5; i++) {
-    Cmd c = CMD_ON;
+    Cmd command = CMD_ON;
     if(commandQueue) {
-      xQueueSend(commandQueue, &c, 0);
+      xQueueSend(commandQueue, &command, 0);
     }
-
     vTaskDelay(pdMS_TO_TICKS(400));
-
-    c = CMD_OFF;
+    command = CMD_OFF;
     if(commandQueue) {
-      xQueueSend(commandQueue, &c, 0);
+      xQueueSend(commandQueue, &command, 0);
     }
     vTaskDelay(pdMS_TO_TICKS(400));
   }
@@ -138,19 +141,23 @@ void burstLight(void *arg) {
 
 void onOffSystem(void *arg) {
   Cmd cmd;
-  for(;;) {
+  while(1) {
     if(xQueueReceive(commandQueue, &cmd, portMAX_DELAY) == pdTRUE) {
       switch (cmd)
       {
       case CMD_ON:
-        if (!isLightOn) doLightsOnOnce(NULL);
+        if (!isLightOn){ 
+          doLightsOnOnce(NULL);
+        }
         if(globalMsg){
           globalMsg -> setValue("ACK:ON");
           globalMsg -> notify();
         }
         break;
       case CMD_OFF:
-        if(isLightOn) doLightsOffOnce(NULL);
+        if(isLightOn) {
+          doLightsOffOnce(NULL);
+        }
         if(globalMsg) {
           globalMsg -> setValue("ACK:OFF");
           globalMsg -> notify();
@@ -161,27 +168,43 @@ void onOffSystem(void *arg) {
   }
 }
 
+void sensorTask(void *pvParameters){ 
+  int motion_sensor_last_state = -1;
+  while(1)  { 
+    // code for ultrasonic sensor 
+    digitalWrite(TRIG_PIN, LOW);
+    vTaskDelay(pdMS_TO_TICKS(10); 
+    digitalWrite(TRIG_PIN, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(10); 
+    digitalWrite(TRIG_PIN, LOW);
 
-void sensorTask(void *arg) {
-  bool prevStateUS = digitalRead(US_SENSOR);
-  bool prevStateMotion = digitalRead(MOTION_SENSOR);
-  for(;;) {
-    bool currStateUS = digitalRead(US_SENSOR);
-    bool currStateMotion = digitalRead(MOTION_SENSOR);
-    if((currStateUS != prevStateUS) || (currStateMotion != prevStateMotion)) {
-      if(currStateUS || currStateMotion) {
-        Serial.println("Motion or US Tripped, High");
-        Cmd c = CMD_ON;
-        if(commandQueue) xQueueSend(commandQueue, &c, 0);
-        } else {
-          Serial.println("Motion or US, Low");
-          Cmd c = CMD_OFF;
-          if(commandQueue) xQueueSend(commandQueue, &c, 0);
+    // Measure echo time in microseconds
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // max wait time 30ms
+    float distance_cm = duration * 0.0343 / 2; // 0.0343cm/µs​ = speed of sound 
+
+    if (duration == 0) {
+      Serial.println("Failed to capture distance");
+    } else {
+      Serial.printf("Distance: %.2f cm\n", distance_cm);
+      if (distance_cm <= 50 ) { 
+        if (person_present == false){ // need to adjust logic so that we can do this for more than one person 
+          Serial.println("Entrance detected!"); 
+        } else { 
+          Serial.println("Exit detected!"); 
+        }
       }
-      prevStateUS = currStateUS;
-      prevStateMotion = currStateMotion;
-    } 
-    vTaskDelay(pdMS_TO_TICKS(50)); //50 ms polling rate
+    }
+    // code for motion sensor 
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    int currentState = digitalRead(PIR_PIN);
+    if (currentState != lastState) {
+      if (currentState == HIGH) {
+        Serial.println("Motion started");
+      } else {
+        Serial.println("Motion ended");
+      }
+      lastState = currentState;
+    }
   }
 }
 
@@ -223,7 +246,7 @@ void alarmTimerCallback(TimerHandle_t) {
   }
 }
 
-
+// BLE stuff - if you write BLE on the app, you turn it on 
 class MyCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
     String v = pCharacteristic->getValue();
@@ -243,7 +266,7 @@ class AlarmCallbacks : public BLECharacteristicCallbacks {
     String v = c->getValue(); v.trim();
     if (!v.length()) return;
 
-    //Set Time
+    //Set Time - prints error on BLE app if time is out of bounds 
     if (v.startsWith("TIME ")) {
       int sp = v.indexOf(' ');
       String t = v.substring(sp+1);
@@ -288,6 +311,9 @@ class AlarmCallbacks : public BLECharacteristicCallbacks {
 
 void setup() {
   Serial.begin(115200);
+  pinMode(MOTION_PIN, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
   switchOn.setPeriodHertz(50);             // Set PWM frequency to 50Hz (standard for most servos)
   switchOff.setPeriodHertz(50);
   switchOn.attach(SERVO_PIN_ON, 500, 2400);    // Attach the servo object to a pin with min/max pulse widths
@@ -333,9 +359,8 @@ void setup() {
   switchOff.write(80);                       
   vTaskDelay(pdMS_TO_TICKS(500));
   
-  pinMode(US_SENSOR, INPUT_PULLDOWN);
-  pinMode(MOTION_SENSOR, INPUT_PULLDOWN);
-
+  // pinMode(US_SENSOR, INPUT_PULLDOWN);
+  // pinMode(MOTION_SENSOR, INPUT_PULLDOWN);
 
   commandQueue = xQueueCreate(8, sizeof(Cmd));                              
   xTaskCreatePinnedToCore(sensorTask, "Sensing", 2048, NULL, 1, &sensorTaskHandle, 0);
