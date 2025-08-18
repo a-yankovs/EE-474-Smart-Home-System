@@ -40,6 +40,10 @@ Servo switchOff;
 static TaskHandle_t sensorTaskHandle = NULL;
 QueueHandle_t commandQueue = NULL;
 TimerHandle_t alarmTmr = NULL;
+TaskHandle_t ultrasonicSensorNotify; 
+
+volatile bool person_entered = false; 
+volatile bool motion_detected = false; 
 
 enum Cmd {
   CMD_ON = 1,
@@ -56,51 +60,6 @@ volatile int32_t lastFiredMinute = -1;
 BLECharacteristic *globalMsg = NULL;
 BLECharacteristic *alarmChar = NULL;
 
-void Task_lightDetector(void *pvParameters){
-    while (1) {
-    // Read light level from the photoresistor.
-    light_level = analogRead(PHOTO_PIN); 
-    Serial.print("Light level: ");
-    Serial.println(light_level);
-    // Take semaphore
-      if(xSemaphoreTake(lightLevelSemaphore,portMAX_DELAY) == pdTRUE){
-        // Calculate the simple moving average and update variables.
-        lightReadings[lightReadListIndex] = light_level;
-        lightReadListIndex = (lightReadListIndex + 1) % WINDOW_SIZE;
-        movingAverage = (lightReadings[0] + lightReadings[1] + lightReadings[2] + lightReadings[3] + lightReadings[4]) / WINDOW_SIZE; 
-        xSemaphoreGive(lightLevelSemaphore); // give back the semaphore 
-      } else { 
-        Serial.println("Couldn't get semaphore for light detection task"); 
-      }
-      vTaskDelay(pdMS_TO_TICKS(10)); 
-    }
-}
-
-/**
- * @brief Displays light level and moving average on LCD.
- * @param pvParameters Not used.
- * @details Pinned to Core 0.
- */
-void Task_displayAverage(void *pvParameters) {
-  int prevMovingAverage = -1; 
-    while (1) { 
-      if(xSemaphoreTake(lightLevelSemaphore,portMAX_DELAY) == pdTRUE){
-  // If data has changed, update the LCD with the new light level and SMA.
-          lcd.setCursor(0, 0);
-          lcd.print("Light: ");
-          lcd.print(light_level);
-        if (prevMovingAverage != movingAverage) { 
-          lcd.setCursor(0, 1);
-          lcd.print("Moving Avg: ");
-          lcd.print(movingAverage);
-          prevMovingAverage = movingAverage; 
-        }
-      xSemaphoreGive(lightLevelSemaphore); 
-      } else { 
-        Serial.println("Couldn't get semaphore for lcd display task"); 
-      }
-      vTaskDelay(pdMS_TO_TICKS(50)); 
-    }
     
 }
 // toggles lights on and servos return to default position 
@@ -168,10 +127,31 @@ void onOffSystem(void *arg) {
   }
 }
 
-void sensorTask(void *pvParameters){ 
+void Task_MotionSense(void *pvParameters){ 
   int motion_sensor_last_state = -1;
-  while(1)  { 
-    // code for ultrasonic sensor 
+  while(1){ 
+    if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
+      // if task notification received, set off motion sensor 
+      int currentState = digitalRead(MOTION_PIN);
+      if (currentState != lastState) {
+        if (currentState == LOW){ //no motion detected 
+          Cmd c = CMD_OFF; 
+          if (commandQueue) { 
+            xQueueSend(commandQueue, &c, 0); 
+          }
+        } else if(currentState == HIGH){ 
+          Cmd c = CMD_ON; 
+          if (commandQueue) { 
+            xQueueSend(commandQueue, &c, 0); 
+        }
+        lastState = currentState;
+    }
+    }
+  }
+}
+
+void Task_ultraSonicSense(void *pvParameters){ 
+  while(1){ 
     digitalWrite(TRIG_PIN, LOW);
     vTaskDelay(pdMS_TO_TICKS(10); 
     digitalWrite(TRIG_PIN, HIGH);
@@ -187,27 +167,17 @@ void sensorTask(void *pvParameters){
     } else {
       Serial.printf("Distance: %.2f cm\n", distance_cm);
       if (distance_cm <= 50 ) { 
-        if (person_present == false){ // need to adjust logic so that we can do this for more than one person 
-          Serial.println("Entrance detected!"); 
-        } else { 
-          Serial.println("Exit detected!"); 
+      // task notifications here 
+      xTaskNotifyGive(ultrasonicSensorNotify);
+        if(person_present){ 
+          Serial.println("Person exiting room"); 
+        } else{ 
+          Serial.println("Person entered room"); 
         }
       }
     }
-    // code for motion sensor 
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    int currentState = digitalRead(PIR_PIN);
-    if (currentState != lastState) {
-      if (currentState == HIGH) {
-        Serial.println("Motion started");
-      } else {
-        Serial.println("Motion ended");
-      }
-      lastState = currentState;
-    }
   }
 }
-
 
 void alarmTimerCallback(TimerHandle_t) {
   if(!clockSet) return;
