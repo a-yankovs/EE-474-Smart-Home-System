@@ -28,7 +28,7 @@
 #define TRIG_PIN 17
 #define ECHO_PIN 16
 #define MOTION_PIN 12
-#define BUTTON_PIN 18
+#define BUTTON_PIN 2
 
 #define ON_POS_ACTIVE   180
 #define ON_POS_REST      80
@@ -41,7 +41,6 @@ Servo switchOff;
 // static TaskHandle_t sensorTaskHandle = NULL;
 QueueHandle_t commandQueue = NULL;
 TimerHandle_t alarmTmr = NULL;
-TaskHandle_t ultrasonicSensorNotify; 
 
 volatile bool person_present = false; 
 volatile bool system_sleep = true; 
@@ -74,13 +73,16 @@ static void deepSleep(){
   // wait for the button to be pressed, then wake system up 
   // if system_sleep == false, and button is pressed, send system to deep sleep 
 void Task_buttonSleep(void *pvParameters){ 
+  static uint32_t last = 0;
   while(1){ 
-    long last = millis(); 
-    if ((system_sleep == false) && (digitalRead(BUTTON_PIN) == LOW) && (millis() - last) > 60){ 
-      system_sleep = true; 
-      deepSleep();  
+    if ((system_sleep == false) && (digitalRead(BUTTON_PIN) == LOW)){ 
+      if ((millis() - last) > 60) {
+        system_sleep = true; 
+        deepSleep();  
+      }
+      last = millis(); 
     } 
-    vTaskDelay(pd_MS_TO_TICKS(100)); 
+    vTaskDelay(pdMS_TO_TICKS(100)); 
   }
 }
   
@@ -166,8 +168,6 @@ void Task_ultrasonicSense(void *pvParameters){
     } else {
       Serial.printf("Distance: %.2f cm\n", distance_cm);
       if (distance_cm <= 50 ) { 
-      // task notifications here 
-      xTaskNotifyGive(ultrasonicSensorNotify);
         if(person_present){ 
           Serial.println("Person exiting room"); 
         } else{ 
@@ -176,6 +176,7 @@ void Task_ultrasonicSense(void *pvParameters){
         person_present = !(person_present); 
       }
     }
+    vTaskDelay(pdMS_TO_TICKS(200)); 
   }
 }
 
@@ -281,6 +282,9 @@ class AlarmCallbacks : public BLECharacteristicCallbacks {
 
 void setup() {
   Serial.begin(115200);
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+    system_sleep = false;
+  }
   pinMode(MOTION_PIN, INPUT);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
@@ -336,10 +340,11 @@ void setup() {
 
   commandQueue = xQueueCreate(8, sizeof(Cmd));                              
   xTaskCreatePinnedToCore(onOffSystem, "OnOff", 2048, NULL, 2, NULL, 1);
-  xTaskCreatePinnedToCore(Task_MotionSense, "MotionSense", 3072, NULL, 2, &ultrasonicSensorNotify, 1);
   xTaskCreatePinnedToCore(Task_ultrasonicSense, "UltraSense", 3072, NULL, 1, NULL, 0);
-
-  deepSleep(); 
+  xTaskCreate(Task_buttonSleep, "Button Sleep Task", 1024, NULL, 1, NULL); 
+  if (system_sleep) {
+    deepSleep();
+  }
 }
 
 void loop() {}
