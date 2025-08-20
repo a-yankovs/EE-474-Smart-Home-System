@@ -1,3 +1,5 @@
+// Main Node that receives BLE signal from user's phone and sends ESP-NOW signal to Secondary Node  
+
 #include <ESP32Servo.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,9 +25,10 @@
 #define SCL 9                         ///< I2C SCL pin
 #define SERVO_PIN_ON 4 //NO CHANGE
 #define SERVO_PIN_OFF 5 //NO CHANGE
-#define TRIG_PIN 10
-#define ECHO_PIN 11
+#define TRIG_PIN 17
+#define ECHO_PIN 16
 #define MOTION_PIN 12
+#define BUTTON_PIN 18
 
 #define ON_POS_ACTIVE   180
 #define ON_POS_REST      80
@@ -41,12 +44,13 @@ TimerHandle_t alarmTmr = NULL;
 TaskHandle_t ultrasonicSensorNotify; 
 
 volatile bool person_present = false; 
-volatile bool motion_detected = false; 
+volatile bool system_sleep = true; 
+
 
 enum Cmd {
   CMD_ON = 1,
   CMD_OFF = 2};
-  
+
 volatile bool isLightOn = false;
 volatile bool clockSet = false;
 volatile int8_t clk_h = -1; 
@@ -58,6 +62,27 @@ volatile int32_t lastFiredMinute = -1;
 BLECharacteristic *globalMsg = NULL;
 BLECharacteristic *alarmChar = NULL;
 
+static void deepSleep(){
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0);
+  vTaskDelay(pdMS_TO_TICKS(50)); 
+  person_present = true; 
+  esp_deep_sleep_start(); 
+}
+
+// find a better way to do this?
+  // if system_sleep == true, send system to deep sleep 
+  // wait for the button to be pressed, then wake system up 
+  // if system_sleep == false, and button is pressed, send system to deep sleep 
+void Task_buttonSleep(void *pvParameters){ 
+  while(1){ 
+    long last = millis(); 
+    if ((system_sleep == false) && (digitalRead(BUTTON_PIN) == LOW) && (millis() - last) > 60){ 
+      system_sleep = true; 
+      deepSleep();  
+    } 
+    vTaskDelay(pd_MS_TO_TICKS(100)); 
+  }
+}
   
 // toggles lights on and servos return to default position 
 void doLightsOnOnce(void *arg) {
@@ -119,31 +144,6 @@ void onOffSystem(void *arg) {
           globalMsg -> notify();
         }
         break;
-      }
-    }
-  }
-}
-
-void Task_MotionSense(void *pvParameters){ 
-  int last_state = -1;
-  while(1){ 
-    if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
-      // if task notification received, set off motion sensor 
-      int currentState = digitalRead(MOTION_PIN);
-      if (currentState != last_state) {
-        if (currentState == LOW){ //no motion detected 
-          Cmd c = CMD_OFF; 
-          if (commandQueue) { 
-            xQueueSend(commandQueue, &c, 0); 
-          }
-        } else if(currentState == HIGH){ 
-          Cmd c = CMD_ON; 
-          if (commandQueue) { 
-            xQueueSend(commandQueue, &c, 0); 
-          }
-
-        }
-        last_state = currentState;
       }
     }
   }
@@ -284,12 +284,13 @@ void setup() {
   pinMode(MOTION_PIN, INPUT);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); 
 
   switchOn.setPeriodHertz(50);             // Set PWM frequency to 50Hz (standard for most servos)
   switchOff.setPeriodHertz(50);
   switchOn.attach(SERVO_PIN_ON, 500, 2400);    // Attach the servo object to a pin with min/max pulse widths
   switchOff.attach(SERVO_PIN_OFF, 500, 2400);    // Attach the servo object to a pin with min/max pulse widths
-  BLEDevice::init("MyESP32");
+  BLEDevice::init("SmartHome1");
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
@@ -337,6 +338,8 @@ void setup() {
   xTaskCreatePinnedToCore(onOffSystem, "OnOff", 2048, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(Task_MotionSense, "MotionSense", 3072, NULL, 2, &ultrasonicSensorNotify, 1);
   xTaskCreatePinnedToCore(Task_ultrasonicSense, "UltraSense", 3072, NULL, 1, NULL, 0);
+
+  deepSleep(); 
 }
 
 void loop() {}
